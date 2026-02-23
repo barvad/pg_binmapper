@@ -93,20 +93,28 @@ static TableBinaryLayout *
     return layout;
   }
 
+
 PG_FUNCTION_INFO_V1(parse_binary_payload);
-PG_FUNCTION_INFO_V1(parse_binary_payload);
+
+
 Datum parse_binary_payload(PG_FUNCTION_ARGS) {
     Oid table_oid = PG_GETARG_OID(0);
     bytea *payload = PG_GETARG_BYTEA_P(1);
     char *data = VARDATA_ANY(payload);
     int data_len = VARSIZE_ANY_EXHDR(payload);
 
-    TableBinaryLayout *layout = get_or_create_layout(table_oid);
-    TupleDesc tupdesc = layout->tupdesc;
-    
-    Datum *values = palloc0(tupdesc->natts * sizeof(Datum));
-    bool *nulls = palloc0(tupdesc->natts * sizeof(bool));
+    TableBinaryLayout *layout;
+    TupleDesc tupdesc;
+    Datum *values;
+    bool *nulls;
     int offset = 0;
+    HeapTuple tuple; 
+
+    layout = get_or_create_layout(table_oid);
+    tupdesc = layout->tupdesc;
+    
+    values = palloc0(tupdesc->natts * sizeof(Datum));
+    nulls = palloc0(tupdesc->natts * sizeof(bool));
 
     if (data_len != layout->total_binary_size)
         elog(ERROR, "Expected %d bytes, got %d", layout->total_binary_size, data_len);
