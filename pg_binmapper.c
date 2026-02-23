@@ -4,9 +4,9 @@
 #include "utils/lsyscache.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
-#include "inval.h"
+#include "utils/inval.h"   
 #include "utils/hsearch.h"
-#include "port/pg_bswap.h" /* Для разворота байтов */
+#include "port/pg_bswap.h"
 
 PG_MODULE_MAGIC;
 
