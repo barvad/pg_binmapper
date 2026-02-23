@@ -1,0 +1,4 @@
+comment = 'High-speed binary to record mapper'
+default_version = '1.0'
+module_pathname = '$libdir/pg_binmapper'
+relocatable = true
