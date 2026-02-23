@@ -87,20 +87,20 @@ parse_binary_payload(PG_FUNCTION_ARGS)
     Oid table_oid = PG_GETARG_OID(0);
     bytea *payload = PG_GETARG_BYTEA_P(1);
     char *raw_ptr = VARDATA_ANY(payload);
-    int data_len = VARSIZE_ANY_EXHDR(payload);
+    int input_size = VARSIZE_ANY_EXHDR(payload);
 
     TableBinaryLayout *layout;
     Datum *values;
     bool *nulls;
     HeapTuple tuple;
+    HeapTupleHeader res; /* Перенесено в начало для C90 */
     int i;
-
-    elog(LOG, "[BINMAPPER] Start parsing for Table OID: %u, Payload len: %d", table_oid, data_len);
 
     layout = get_or_create_layout(table_oid);
 
-    if (data_len != layout->total_binary_size) {
-        elog(ERROR, "[BINMAPPER] Size mismatch! Table expects %d, but got %d", layout->total_binary_size, data_len);
+    if (input_size != layout->total_binary_size) {
+        ereport(ERROR, (errmsg("SIZE ERROR: expected %d, got %d", 
+                layout->total_binary_size, input_size)));
     }
 
     values = (Datum *) palloc0(layout->tupdesc->natts * sizeof(Datum));
@@ -119,55 +119,42 @@ parse_binary_payload(PG_FUNCTION_ARGS)
         field_ptr = raw_ptr + layout->offsets[i];
         len = (attr->attlen > 0) ? attr->attlen : 16;
 
-        elog(LOG, "[BINMAPPER] Processing col %d: %s (TypeOID: %u, Offset: %d, Len: %d)", 
-             i, NameStr(attr->attname), attr->atttypid, layout->offsets[i], len);
-
         if (attr->attbyval) {
-            uint64 tmp = 0;
-            memcpy(&tmp, field_ptr, (len <= 8) ? len : 8);
+            uint64 raw_val = 0;
+            memcpy(&raw_val, field_ptr, (len <= 8) ? len : 8);
 
-            if (len == 8) tmp = pg_bswap64(tmp);
-            else if (len == 4) tmp = (uint64)pg_bswap32((uint32)tmp);
-            else if (len == 2) tmp = (uint64)pg_bswap16((uint16)tmp);
+            if (len == 8) raw_val = pg_bswap64(raw_val);
+            else if (len == 4) raw_val = (uint64)pg_bswap32((uint32)raw_val);
+            else if (len == 2) raw_val = (uint64)pg_bswap16((uint16)raw_val);
 
             if (attr->atttypid == FLOAT4OID) {
                 union { uint32 i; float4 f; } u;
-                u.i = (uint32)tmp;
+                u.i = (uint32)raw_val;
                 values[i] = Float4GetDatum(u.f);
-                elog(LOG, "[BINMAPPER] Float4 value: %f", u.f);
             } else {
-                values[i] = (Datum)tmp;
-                elog(LOG, "[BINMAPPER] Int/ByVal value: %ld", (long)tmp);
+                values[i] = (Datum)raw_val;
             }
         } else {
-            if (attr->atttypid == UUIDOID) {
-                pg_uuid_t *uuid = (pg_uuid_t *) palloc(sizeof(pg_uuid_t));
-                memcpy(uuid->data, field_ptr, 16);
-                values[i] = UUIDPGetDatum(uuid);
-                elog(LOG, "[BINMAPPER] UUID Pointer: %p", uuid);
-            } else {
-                void *copy = palloc(len);
-                memcpy(copy, field_ptr, len);
-                values[i] = PointerGetDatum(copy);
-                elog(LOG, "[BINMAPPER] Other ByRef Pointer: %p", copy);
-            }
+            pg_uuid_t *uuid = (pg_uuid_t *) palloc(sizeof(pg_uuid_t));
+            memcpy(uuid->data, field_ptr, 16);
+            values[i] = UUIDPGetDatum(uuid);
         }
     }
 
-    elog(LOG, "[BINMAPPER] All fields mapped. Calling heap_form_tuple...");
     tuple = heap_form_tuple(layout->tupdesc, values, nulls);
-    elog(LOG, "[BINMAPPER] Tuple formed successfully.");
-
-    HeapTupleHeader res = (HeapTupleHeader) palloc(tuple->t_len);
-    memcpy(res, tuple->t_header, tuple->t_len);
     
-    // Устанавливаем метаданные типа, чтобы Postgres опознал структуру
+    /* Копируем данные заголовка кортежа */
+    res = (HeapTupleHeader) palloc(tuple->t_len);
+    memcpy(res, tuple->t_data, tuple->t_len);
+    
+    /* Привязываем кортеж к OID таблицы */
     HeapTupleHeaderSetTypeId(res, table_oid);
     HeapTupleHeaderSetTypMod(res, -1);
 
     pfree(values);
-    nulls ? pfree(nulls) : 0;
+    pfree(nulls);
     heap_freetuple(tuple);
 
-    PG_RETURN_HEAPTUPLEHEADER_DATUM(res);
+    /* Используем правильный макрос для возврата заголовка как Datum */
+    PG_RETURN_DATUM(HeapTupleHeaderGetDatum(res));
 }
