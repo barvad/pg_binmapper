@@ -96,67 +96,71 @@ static TableBinaryLayout *
 PG_FUNCTION_INFO_V1(parse_binary_payload);
 
 Datum
-parse_binary_payload(PG_FUNCTION_ARGS) {
-  Oid table_oid = PG_GETARG_OID(0);
-  bytea * binary_data = PG_GETARG_BYTEA_P(1);
-  char * raw_ptr = VARDATA_ANY(binary_data);
-  int input_size = VARSIZE_ANY_EXHDR(binary_data);
+parse_binary_payload(PG_FUNCTION_ARGS)
+{
+    Oid table_oid = PG_GETARG_OID(0);
+    bytea *binary_data = PG_GETARG_BYTEA_P(1);
+    char *raw_ptr = VARDATA_ANY(binary_data);
+    int input_size = VARSIZE_ANY_EXHDR(binary_data);
+    TableBinaryLayout *layout;
+    Datum *values;
+    bool *nulls;
+    HeapTuple tuple;
 
-  TableBinaryLayout * layout = get_or_create_layout(table_oid);
+    layout = get_or_create_layout(table_oid);
 
-  if (input_size != layout -> total_binary_size) {
-    ereport(ERROR, (errcode(ERRCODE_PROTOCOL_VIOLATION),
-      errmsg("Binary size mismatch: expected %d, got %d", layout -> total_binary_size, input_size)));
-  }
+    // СТРОГАЯ ПРОВЕРКА РАЗМЕРА (чтобы не было смещений)
+    if (input_size != layout->total_binary_size) {
+        ereport(ERROR, (errmsg("SIZE ERROR: expected %d, got %d", 
+                layout->total_binary_size, input_size)));
+    }
 
-  Datum * values = palloc(layout -> tupdesc -> natts * sizeof(Datum));
-  bool * nulls = palloc0(layout -> tupdesc -> natts * sizeof(bool));
-
-    memset(values, 0, layout->tupdesc->natts * sizeof(Datum));
-    memset(nulls, 0, layout->tupdesc->natts * sizeof(bool));
+    values = (Datum *) palloc0(layout->tupdesc->natts * sizeof(Datum));
+    nulls = (bool *) palloc0(layout->tupdesc->natts * sizeof(bool));
 
     for (int i = 0; i < layout->tupdesc->natts; i++) {
         Form_pg_attribute attr = TupleDescAttr(layout->tupdesc, i);
-        char *field_ptr = raw_ptr + layout->offsets[i];
-        int len = (attr->attlen > 0) ? attr->attlen : (attr->atttypid == 2950 ? 16 : 0);
+        char *field_ptr;
+        int len;
 
-        if (attr->attisdropped) { nulls[i] = true; continue; }
+        if (attr->attisdropped) {
+            nulls[i] = true;
+            continue;
+        }
+
+        field_ptr = raw_ptr + layout->offsets[i];
+        len = (attr->attlen > 0) ? attr->attlen : (attr->atttypid == 2950 ? 16 : 0);
 
         if (attr->attbyval) {
             uint64 raw_val = 0;
             memcpy(&raw_val, field_ptr, (len <= 8) ? len : 8);
 
-            /* Разворот Big-Endian */
             if (len == 8) raw_val = pg_bswap64(raw_val);
             else if (len == 4) raw_val = (uint64)pg_bswap32((uint32)raw_val);
             else if (len == 2) raw_val = (uint64)pg_bswap16((uint16)raw_val);
 
-            /* Жесткая упаковка по OID типов */
-            switch (attr->atttypid) {
-                case 23: // INT4
-                    values[i] = Int32GetDatum((int32)raw_val);
-                    break;
-                case 20: // INT8
-                    values[i] = Int64GetDatum((int64)raw_val);
-                    break;
-                case 700: { // FLOAT4
-                    union { uint32 i; float4 f; } u;
-                    u.i = (uint32)raw_val;
-                    values[i] = Float4GetDatum(u.f);
-                    break;
-                }
-                default:
-                    values[i] = (Datum)raw_val;
+            // Безопасная упаковка float4
+            if (attr->atttypid == 700) {
+                union { uint32 i; float4 f; } u;
+                u.i = (uint32)raw_val;
+                values[i] = Float4GetDatum(u.f);
+            } else {
+                values[i] = (Datum)raw_val;
             }
         } else {
-            /* Для UUID и фиксированных ссылочных типов */
-            /* Используем palloc в контексте текущего вызова */
-            void *copy = palloc(len);
+            // Для UUID (byref): обязательно делаем отдельный palloc
+            // и передаем именно PointerGetDatum
+            char *copy = (char *) palloc(len);
             memcpy(copy, field_ptr, len);
             values[i] = PointerGetDatum(copy);
         }
     }
 
-  HeapTuple tuple = heap_form_tuple(layout -> tupdesc, values, nulls);
-  PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+    tuple = heap_form_tuple(layout->tupdesc, values, nulls);
+    
+    // Очистка временных массивов
+    pfree(values);
+    pfree(nulls);
+
+    PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
