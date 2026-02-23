@@ -96,8 +96,9 @@ static TableBinaryLayout *
 
 PG_FUNCTION_INFO_V1(parse_binary_payload);
 
-
-Datum parse_binary_payload(PG_FUNCTION_ARGS) {
+Datum
+parse_binary_payload(PG_FUNCTION_ARGS)
+{
     Oid table_oid = PG_GETARG_OID(0);
     bytea *payload = PG_GETARG_BYTEA_P(1);
     char *data = VARDATA_ANY(payload);
@@ -108,42 +109,55 @@ Datum parse_binary_payload(PG_FUNCTION_ARGS) {
     Datum *values;
     bool *nulls;
     int offset = 0;
-    HeapTuple tuple; 
+    HeapTuple tuple;
+    int i;
 
     layout = get_or_create_layout(table_oid);
     tupdesc = layout->tupdesc;
-    
-    values = palloc0(tupdesc->natts * sizeof(Datum));
-    nulls = palloc0(tupdesc->natts * sizeof(bool));
 
     if (data_len != layout->total_binary_size)
-        elog(ERROR, "Expected %d bytes, got %d", layout->total_binary_size, data_len);
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROTOCOL_VIOLATION),
+                 errmsg("Expected %d bytes, got %d", layout->total_binary_size, data_len)));
+    }
 
-    for (int i = 0; i < tupdesc->natts; i++) {
+    values = (Datum *) palloc0(tupdesc->natts * sizeof(Datum));
+    nulls = (bool *) palloc0(tupdesc->natts * sizeof(bool));
+
+    for (i = 0; i < tupdesc->natts; i++)
+    {
         Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-        if (attr->attisdropped) { nulls[i] = true; continue; }
+        if (attr->attisdropped)
+        {
+            nulls[i] = true;
+            continue;
+        }
 
-        if (attr->attbyval) {
-            // Читаем числовые типы (int, float)
+        if (attr->attbyval)
+        {
             uint64 tmp = 0;
             memcpy(&tmp, data + offset, attr->attlen);
 
-            // Разворот Big-Endian
+            /* Разворот Big-Endian */
             if (attr->attlen == 8) tmp = pg_bswap64(tmp);
-            else if (attr->attlen == 4) tmp = pg_bswap32((uint32)tmp);
-            else if (attr->attlen == 2) tmp = pg_bswap16((uint16)tmp);
+            else if (attr->attlen == 4) tmp = (uint64)pg_bswap32((uint32)tmp);
+            else if (attr->attlen == 2) tmp = (uint64)pg_bswap16((uint16)tmp);
 
-            // Магия Float4: Postgres хранит float4 в Datum как "притворяющийся" int32
-            if (attr->atttypid == FLOAT4OID) {
+            if (attr->atttypid == FLOAT4OID)
+            {
                 union { uint32 i; float4 f; } u;
                 u.i = (uint32)tmp;
                 values[i] = Float4GetDatum(u.f);
-            } else {
+            }
+            else
+            {
                 values[i] = (Datum)tmp;
             }
-        } else {
-            // Для ссылочных типов (UUID) копируем данные в новую память
-            // Postgres сам позаботится о выравнивании внутри heap_form_tuple
+        }
+        else
+        {
+            /* Ссылочные типы (UUID) */
             int len = (attr->atttypid == 2950) ? 16 : attr->attlen;
             char *copy = palloc(len);
             memcpy(copy, data + offset, len);
@@ -152,6 +166,10 @@ Datum parse_binary_payload(PG_FUNCTION_ARGS) {
         offset += (attr->attlen > 0) ? attr->attlen : 16;
     }
 
-    HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+    tuple = heap_form_tuple(tupdesc, values, nulls);
+    
+    pfree(values);
+    pfree(nulls);
+
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
