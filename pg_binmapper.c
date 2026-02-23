@@ -98,50 +98,53 @@ PG_FUNCTION_INFO_V1(parse_binary_payload);
 Datum
 parse_binary_payload(PG_FUNCTION_ARGS)
 {
-    Oid table_oid = PG_GETARG_OID(0);
     bytea *binary_data = PG_GETARG_BYTEA_P(1);
     char *raw_ptr = VARDATA_ANY(binary_data);
     int input_size = VARSIZE_ANY_EXHDR(binary_data);
-    TableBinaryLayout *layout;
     
+    TupleDesc tupdesc;
     Datum *values;
     bool *nulls;
     HeapTuple tuple;
 
-    /* Переменные для маппинга (объявляем в начале для C90) */
     uint32 v4;
     uint64 v8;
     union { uint32 i; float4 f; } u;
     unsigned char *uuid_data;
 
-    layout = get_or_create_layout(table_oid);
-
-    if (input_size != 32) {
+    if (input_size != 32)
         ereport(ERROR, (errmsg("Expected 32 bytes, got %d", input_size)));
-    }
 
-    values = (Datum *) palloc0(layout->tupdesc->natts * sizeof(Datum));
-    nulls = (bool *) palloc0(layout->tupdesc->natts * sizeof(bool));
+    /* СОЗДАЕМ ОПИСАНИЕ СТРОКИ ВРУЧНУЮ */
+    tupdesc = CreateTemplateTupleDesc(4);
+    TupleDescInitEntry(tupdesc, (AttrNumber) 1, "id", INT4OID, -1, 0);
+    TupleDescInitEntry(tupdesc, (AttrNumber) 2, "ts", INT8OID, -1, 0);
+    TupleDescInitEntry(tupdesc, (AttrNumber) 3, "temperature", FLOAT4OID, -1, 0);
+    TupleDescInitEntry(tupdesc, (AttrNumber) 4, "device_uid", UUIDOID, -1, 0);
+    tupdesc = BlessTupleDesc(tupdesc);
 
-    // 1. ID (int4) - Offset 0
+    values = (Datum *) palloc0(4 * sizeof(Datum));
+    nulls = (bool *) palloc0(4 * sizeof(bool));
+
+    // 1. ID
     memcpy(&v4, raw_ptr + 0, 4);
     values[0] = Int32GetDatum(pg_bswap32(v4));
 
-    // 2. TS (int8) - Offset 4
+    // 2. TS
     memcpy(&v8, raw_ptr + 4, 8);
     values[1] = Int64GetDatum(pg_bswap64(v8));
 
-    // 3. Temp (float4) - Offset 12
+    // 3. Temp
     memcpy(&u.i, raw_ptr + 12, 4);
     u.i = pg_bswap32(u.i);
     values[2] = Float4GetDatum(u.f);
 
-    // 4. UUID - Offset 16
+    // 4. UUID - ТЕПЕРЬ ЭТО ГАРАНТИРОВАННО ЧЕТВЕРТОЕ ПОЛЕ
     uuid_data = (unsigned char *) palloc(16);
     memcpy(uuid_data, raw_ptr + 16, 16);
     values[3] = PointerGetDatum(uuid_data);
 
-    tuple = heap_form_tuple(layout->tupdesc, values, nulls);
+    tuple = heap_form_tuple(tupdesc, values, nulls);
     
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
