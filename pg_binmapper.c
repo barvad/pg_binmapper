@@ -80,7 +80,10 @@ static TableBinaryLayout* get_or_create_layout(Oid relid) {
 }
 
 PG_FUNCTION_INFO_V1(parse_binary_payload);
-Datum parse_binary_payload(PG_FUNCTION_ARGS) {
+
+Datum
+parse_binary_payload(PG_FUNCTION_ARGS)
+{
     Oid table_oid = PG_GETARG_OID(0);
     bytea *payload = PG_GETARG_BYTEA_P(1);
     char *raw_ptr = VARDATA_ANY(payload);
@@ -92,10 +95,13 @@ Datum parse_binary_payload(PG_FUNCTION_ARGS) {
     HeapTuple tuple;
     int i;
 
+    elog(LOG, "[BINMAPPER] Start parsing for Table OID: %u, Payload len: %d", table_oid, data_len);
+
     layout = get_or_create_layout(table_oid);
 
-    if (data_len != layout->total_binary_size)
-        ereport(ERROR, (errmsg("Expected %d bytes, got %d", layout->total_binary_size, data_len)));
+    if (data_len != layout->total_binary_size) {
+        elog(ERROR, "[BINMAPPER] Size mismatch! Table expects %d, but got %d", layout->total_binary_size, data_len);
+    }
 
     values = (Datum *) palloc0(layout->tupdesc->natts * sizeof(Datum));
     nulls = (bool *) palloc0(layout->tupdesc->natts * sizeof(bool));
@@ -113,6 +119,9 @@ Datum parse_binary_payload(PG_FUNCTION_ARGS) {
         field_ptr = raw_ptr + layout->offsets[i];
         len = (attr->attlen > 0) ? attr->attlen : 16;
 
+        elog(LOG, "[BINMAPPER] Processing col %d: %s (TypeOID: %u, Offset: %d, Len: %d)", 
+             i, NameStr(attr->attname), attr->atttypid, layout->offsets[i], len);
+
         if (attr->attbyval) {
             uint64 tmp = 0;
             memcpy(&tmp, field_ptr, (len <= 8) ? len : 8);
@@ -121,30 +130,34 @@ Datum parse_binary_payload(PG_FUNCTION_ARGS) {
             else if (len == 4) tmp = (uint64)pg_bswap32((uint32)tmp);
             else if (len == 2) tmp = (uint64)pg_bswap16((uint16)tmp);
 
-            if (attr->atttypid == 700) { /* FLOAT4OID */
+            if (attr->atttypid == FLOAT4OID) {
                 union { uint32 i; float4 f; } u;
                 u.i = (uint32)tmp;
                 values[i] = Float4GetDatum(u.f);
+                elog(LOG, "[BINMAPPER] Float4 value: %f", u.f);
             } else {
                 values[i] = (Datum)tmp;
+                elog(LOG, "[BINMAPPER] Int/ByVal value: %ld", (long)tmp);
             }
         } else {
-            /* Ссылочные типы (UUID) */
-            if (attr->atttypid == 2950) { /* UUID OID */
-                /* Выделяем память под официальную структуру UUID */
+            if (attr->atttypid == UUIDOID) {
                 pg_uuid_t *uuid = (pg_uuid_t *) palloc(sizeof(pg_uuid_t));
                 memcpy(uuid->data, field_ptr, 16);
                 values[i] = UUIDPGetDatum(uuid);
+                elog(LOG, "[BINMAPPER] UUID Pointer: %p", uuid);
             } else {
-                /* Для прочих типов (если будут) */
                 void *copy = palloc(len);
                 memcpy(copy, field_ptr, len);
                 values[i] = PointerGetDatum(copy);
+                elog(LOG, "[BINMAPPER] Other ByRef Pointer: %p", copy);
             }
         }
     }
 
+    elog(LOG, "[BINMAPPER] All fields mapped. Calling heap_form_tuple...");
     tuple = heap_form_tuple(layout->tupdesc, values, nulls);
+    elog(LOG, "[BINMAPPER] Tuple formed successfully.");
+
     pfree(values);
     pfree(nulls);
 
