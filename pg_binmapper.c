@@ -20,6 +20,8 @@
 
 #include "access/htup_details.h"
 
+#include "utils/uuid.h"
+
 PG_MODULE_MAGIC;
 
 typedef struct {
