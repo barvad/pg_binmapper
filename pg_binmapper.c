@@ -51,49 +51,48 @@ void _PG_init(void) {
   CacheRegisterRelcacheCallback(invalidate_layout_cache, (Datum) 0);
 }
 
-static TableBinaryLayout *
-  get_or_create_layout(Oid relid) {
+static TableBinaryLayout*
+get_or_create_layout(Oid relid) {
     bool found;
-    /* Ищем или создаем запись в кэше */
-    TableBinaryLayout * layout = (TableBinaryLayout * ) hash_search(layout_cache, & relid, HASH_ENTER, & found);
+    TableBinaryLayout *layout = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_ENTER, &found);
 
-    if (!found || !layout -> is_valid) {
-      Relation rel = table_open(relid, AccessShareLock);
-      TupleDesc res_tupdesc = RelationGetDescr(rel);
-      int natts = res_tupdesc -> natts;
+    if (!found || !layout->is_valid) {
+        Relation rel = table_open(relid, AccessShareLock);
+        TupleDesc res_tupdesc = RelationGetDescr(rel);
+        int natts = res_tupdesc->natts;
 
-      /* Инициализируем поля структуры, чтобы там не было мусора */
-      layout -> relid = relid;
-      layout -> total_binary_size = 0;
-      layout -> tupdesc = CreateTupleDescCopy(res_tupdesc);
+        layout->tupdesc = CreateTupleDescCopy(res_tupdesc);
+        layout->offsets = (int *) MemoryContextAllocZero(TopMemoryContext, natts * sizeof(int));
+        layout->total_binary_size = 0;
 
-      /* Выделяем память под оффсеты в долгоживущем контексте */
-      layout -> offsets = (int * ) MemoryContextAllocZero(TopMemoryContext, natts * sizeof(int));
+        for (int i = 0; i < natts; i++) {
+            Form_pg_attribute attr = TupleDescAttr(layout->tupdesc, i);
 
-      for (int i = 0; i < natts; i++) {
-        Form_pg_attribute attr = TupleDescAttr(layout -> tupdesc, i);
-        int col_len = 0;
+            /* ИГНОРИРУЕМ: удаленные колонки и системные (oid, ctid и т.д.) */
+            if (attr->attisdropped || attr->attnum <= 0) {
+                layout->offsets[i] = -1; /* Помечаем как невалидную для парсинга */
+                continue;
+            }
 
-        if (attr -> attisdropped) continue;
+            int col_len = 0;
+            if (attr->attlen > 0) {
+                col_len = attr->attlen;
+            } else if (attr->atttypid == 2950) { // UUID
+                col_len = 16;
+            } else {
+                table_close(rel, AccessShareLock);
+                ereport(ERROR, (errmsg("Column %s has unsupported var-length type", NameStr(attr->attname))));
+            }
 
-        if (attr -> attlen > 0) {
-          col_len = attr -> attlen;
-        } else if (attr -> atttypid == 2950) { // UUID
-          col_len = 16;
-        } else {
-          table_close(rel, AccessShareLock);
-          ereport(ERROR, (errmsg("Unsupported type for column %s", NameStr(attr -> attname))));
+            layout->offsets[i] = layout->total_binary_size;
+            layout->total_binary_size += col_len;
         }
 
-        layout -> offsets[i] = layout -> total_binary_size;
-        layout -> total_binary_size += col_len;
-      }
-
-      layout -> is_valid = true;
-      table_close(rel, AccessShareLock);
+        layout->is_valid = true;
+        table_close(rel, AccessShareLock);
     }
     return layout;
-  }
+}
 
 
 PG_FUNCTION_INFO_V1(parse_binary_payload);
