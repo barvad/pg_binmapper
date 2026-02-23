@@ -126,19 +126,23 @@ parse_binary_payload(PG_FUNCTION_ARGS) {
     len = (attr -> attlen > 0) ? attr -> attlen : (attr -> atttypid == 2950 ? 16 : 0);
 
     if (attr -> attbyval) {
-      /* Безопасное чтение значений до 8 байт */
+      /* Безопасное чтение числовых типов */
       uint64 raw_val = 0;
-      memcpy( & raw_val, field_ptr, len);
+      memcpy( & raw_val, field_ptr, (len <= 8) ? len : 8);
 
-      /* Разворачиваем Big-Endian */
+      /* Разворот Big-Endian */
       if (len == 8) raw_val = pg_bswap64(raw_val);
       else if (len == 4) raw_val = (uint64) pg_bswap32((uint32) raw_val);
       else if (len == 2) raw_val = (uint64) pg_bswap16((uint16) raw_val);
 
-      /* Кладем в Datum через каст, чтобы не было мусора в старших битах */
-      values[i] = (Datum) raw_val;
+      if (len == 8) values[i] = Int64GetDatum((int64) raw_val);
+      else if (len == 4) values[i] = Int32GetDatum((int32) raw_val);
+      else if (len == 2) values[i] = Int16GetDatum((int16) raw_val);
+      else values[i] = (Datum) raw_val;
+
     } else {
-      void * copy = palloc(len);
+      /* Используем palloc0 для чистоты памяти */
+      void * copy = palloc0(len);
       memcpy(copy, field_ptr, len);
       values[i] = PointerGetDatum(copy);
     }
