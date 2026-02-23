@@ -52,6 +52,7 @@ void _PG_init(void) {
 static TableBinaryLayout *
   get_or_create_layout(Oid relid) {
     bool found;
+    /* Ищем или создаем запись в кэше */
     TableBinaryLayout * layout = (TableBinaryLayout * ) hash_search(layout_cache, & relid, HASH_ENTER, & found);
 
     if (!found || !layout -> is_valid) {
@@ -59,28 +60,33 @@ static TableBinaryLayout *
       TupleDesc res_tupdesc = RelationGetDescr(rel);
       int natts = res_tupdesc -> natts;
 
-      layout -> tupdesc = CreateTupleDescCopy(res_tupdesc);
-      layout -> offsets = (int * ) MemoryContextAlloc(TopMemoryContext, natts * sizeof(int));
+      /* Инициализируем поля структуры, чтобы там не было мусора */
+      layout -> relid = relid;
       layout -> total_binary_size = 0;
+      layout -> tupdesc = CreateTupleDescCopy(res_tupdesc);
+
+      /* Выделяем память под оффсеты в долгоживущем контексте */
+      layout -> offsets = (int * ) MemoryContextAllocZero(TopMemoryContext, natts * sizeof(int));
 
       for (int i = 0; i < natts; i++) {
         Form_pg_attribute attr = TupleDescAttr(layout -> tupdesc, i);
+        int col_len = 0;
+
         if (attr -> attisdropped) continue;
 
-        int col_len = attr -> attlen;
-        if (col_len < 0) {
-          // Если это UUID, мы знаем, что он 16 байт
-          if (attr -> atttypid == 2950) {
-            col_len = 16;
-          } else {
-            table_close(rel, AccessShareLock);
-            ereport(ERROR, (errmsg("Column %s has variable length and is not UUID.", NameStr(attr -> attname))));
-          }
+        if (attr -> attlen > 0) {
+          col_len = attr -> attlen;
+        } else if (attr -> atttypid == 2950) { // UUID
+          col_len = 16;
+        } else {
+          table_close(rel, AccessShareLock);
+          ereport(ERROR, (errmsg("Unsupported type for column %s", NameStr(attr -> attname))));
         }
 
         layout -> offsets[i] = layout -> total_binary_size;
         layout -> total_binary_size += col_len;
       }
+
       layout -> is_valid = true;
       table_close(rel, AccessShareLock);
     }
