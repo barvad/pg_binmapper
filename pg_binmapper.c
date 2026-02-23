@@ -158,8 +158,16 @@ parse_binary_payload(PG_FUNCTION_ARGS)
     tuple = heap_form_tuple(layout->tupdesc, values, nulls);
     elog(LOG, "[BINMAPPER] Tuple formed successfully.");
 
-    pfree(values);
-    pfree(nulls);
+    HeapTupleHeader res = (HeapTupleHeader) palloc(tuple->t_len);
+    memcpy(res, tuple->t_header, tuple->t_len);
+    
+    // Устанавливаем метаданные типа, чтобы Postgres опознал структуру
+    HeapTupleHeaderSetTypeId(res, table_oid);
+    HeapTupleHeaderSetTypMod(res, -1);
 
-    PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+    pfree(values);
+    nulls ? pfree(nulls) : 0;
+    heap_freetuple(tuple);
+
+    PG_RETURN_HEAPTUPLEHEADER_DATUM(res);
 }
