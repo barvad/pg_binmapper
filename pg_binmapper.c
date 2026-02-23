@@ -114,34 +114,30 @@ parse_binary_payload(PG_FUNCTION_ARGS) {
 
   for (int i = 0; i < layout -> tupdesc -> natts; i++) {
     Form_pg_attribute attr = TupleDescAttr(layout -> tupdesc, i);
-    char * field_ptr = raw_ptr + layout -> offsets[i];
-    int len = (attr -> attlen > 0) ? attr -> attlen : (attr -> atttypid == 2950 ? 16 : 0);
+    char * field_ptr;
+    int len;
 
     if (attr -> attisdropped) {
       nulls[i] = true;
       continue;
     }
-    if (len <= 0) ereport(ERROR, (errmsg("Unsupported type size for %s", NameStr(attr -> attname))));
+
+    field_ptr = raw_ptr + layout -> offsets[i];
+    len = (attr -> attlen > 0) ? attr -> attlen : (attr -> atttypid == 2950 ? 16 : 0);
 
     if (attr -> attbyval) {
-      if (len == 8) {
-        uint64 val8;
-        memcpy( & val8, field_ptr, 8);
-        values[i] = Int64GetDatum(pg_bswap64(val8));
-      } else if (len == 4) {
-        uint32 val4;
-        memcpy( & val4, field_ptr, 4);
-        values[i] = Int32GetDatum(pg_bswap32(val4));
-      } else if (len == 2) {
-        uint16 val2;
-        memcpy( & val2, field_ptr, 2);
-        values[i] = Int16GetDatum(pg_bswap16(val2));
-      } else {
-        values[i] = (Datum) 0;
-        memcpy( & values[i], field_ptr, len);
-      }
+      /* Безопасное чтение значений до 8 байт */
+      uint64 raw_val = 0;
+      memcpy( & raw_val, field_ptr, len);
+
+      /* Разворачиваем Big-Endian */
+      if (len == 8) raw_val = pg_bswap64(raw_val);
+      else if (len == 4) raw_val = (uint64) pg_bswap32((uint32) raw_val);
+      else if (len == 2) raw_val = (uint64) pg_bswap16((uint16) raw_val);
+
+      /* Кладем в Datum через каст, чтобы не было мусора в старших битах */
+      values[i] = (Datum) raw_val;
     } else {
-      // Для UUID и других ссылочных типов (palloc безопасен)
       void * copy = palloc(len);
       memcpy(copy, field_ptr, len);
       values[i] = PointerGetDatum(copy);
