@@ -125,26 +125,38 @@ parse_binary_payload(PG_FUNCTION_ARGS) {
     field_ptr = raw_ptr + layout -> offsets[i];
     len = (attr -> attlen > 0) ? attr -> attlen : (attr -> atttypid == 2950 ? 16 : 0);
 
-    if (attr -> attbyval) {
-      /* Безопасное чтение числовых типов */
-      uint64 raw_val = 0;
-      memcpy( & raw_val, field_ptr, (len <= 8) ? len : 8);
+    if (attr->attbyval) {
+        uint64 raw_val = 0;
+        memcpy(&raw_val, field_ptr, (len <= 8) ? len : 8);
 
-      /* Разворот Big-Endian */
-      if (len == 8) raw_val = pg_bswap64(raw_val);
-      else if (len == 4) raw_val = (uint64) pg_bswap32((uint32) raw_val);
-      else if (len == 2) raw_val = (uint64) pg_bswap16((uint16) raw_val);
+        // Разворот Big-Endian
+        if (len == 8) raw_val = pg_bswap64(raw_val);
+        else if (len == 4) raw_val = (uint64)pg_bswap32((uint32)raw_val);
+        else if (len == 2) raw_val = (uint64)pg_bswap16((uint16)raw_val);
 
-      if (len == 8) values[i] = Int64GetDatum((int64) raw_val);
-      else if (len == 4) values[i] = Int32GetDatum((int32) raw_val);
-      else if (len == 2) values[i] = Int16GetDatum((int16) raw_val);
-      else values[i] = (Datum) raw_val;
-
+        
+        if (attr->atttypid == INT4OID) {
+            values[i] = Int32GetDatum((int32)raw_val);
+        } else if (attr->atttypid == INT8OID) {
+            values[i] = Int64GetDatum((int64)raw_val);
+        } else if (attr->atttypid == FLOAT4OID) {
+            union { uint32 i; float4 f; } u;
+            u.i = (uint32)raw_val;
+            values[i] = Float4GetDatum(u.f);
+        } else if (attr->atttypid == FLOAT8OID) {
+            union { uint64 i; float8 f; } u;
+            u.i = (uint64)raw_val;
+            values[i] = Float8GetDatum(u.f);
+        } else if (attr->atttypid == INT2OID) {
+            values[i] = Int16GetDatum((int16)raw_val);
+        } else {
+            values[i] = (Datum)raw_val;
+        }
     } else {
-      /* Используем palloc0 для чистоты памяти */
-      void * copy = palloc0(len);
-      memcpy(copy, field_ptr, len);
-      values[i] = PointerGetDatum(copy);
+        // UUID и другие ссылочные типы
+        void *copy = palloc0(len);
+        memcpy(copy, field_ptr, len);
+        values[i] = PointerGetDatum(copy);
     }
   }
 
