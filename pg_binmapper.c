@@ -9,6 +9,7 @@
 #include "utils/inval.h"
 #include "port/pg_bswap.h"
 #include "utils/uuid.h"
+#include "catalog/pg_type.h"
 
 PG_MODULE_MAGIC;
 
@@ -62,7 +63,7 @@ static TableBinaryLayout* get_or_create_layout(Oid relid) {
 
             if (attr->attlen > 0) {
                 col_len = attr->attlen;
-            } else if (attr->atttypid == 2950) { /* UUID OID */
+            } else if (attr->atttypid == UUIDOID) { /* UUID OID */
                 col_len = 16;
             } else {
                 table_close(rel, AccessShareLock);
@@ -88,6 +89,7 @@ parse_binary_payload(PG_FUNCTION_ARGS)
     bytea *payload = PG_GETARG_BYTEA_P(1);
     char *raw_ptr = VARDATA_ANY(payload);
     int input_size = VARSIZE_ANY_EXHDR(payload);
+	Oid type_id = PG_GETARG_OID(0);
 
     TableBinaryLayout *layout;
     Datum *values;
@@ -147,8 +149,10 @@ parse_binary_payload(PG_FUNCTION_ARGS)
     res = (HeapTupleHeader) palloc(tuple->t_len);
     memcpy(res, tuple->t_data, tuple->t_len);
     
-    /* Привязываем кортеж к OID таблицы */
-    HeapTupleHeaderSetTypeId(res, table_oid);
+    type_id = get_rel_type_id(table_oid); /* Получаем OID ТИПА таблицы */
+    
+    /* Привязываем кортеж к OID ТИПА */
+    HeapTupleHeaderSetTypeId(res, type_id);
     HeapTupleHeaderSetTypMod(res, -1);
 
     pfree(values);
