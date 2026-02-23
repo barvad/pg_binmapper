@@ -1,12 +1,14 @@
 #include "postgres.h"
 #include "fmgr.h"
+#include "access/table.h"     
 #include "utils/rel.h"
 #include "utils/lsyscache.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
-#include "utils/inval.h"   
+#include "utils/inval.h"
 #include "utils/hsearch.h"
 #include "port/pg_bswap.h"
+#include "access/htup_details.h" 
 
 PG_MODULE_MAGIC;
 
@@ -42,7 +44,7 @@ get_or_create_layout(Oid relid) {
     TableBinaryLayout *layout = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_ENTER, &found);
 
     if (!found || !layout->is_valid) {
-        Relation rel = relation_open(relid, AccessShareLock);
+        Relation rel = table_open(relid, AccessShareLock);
         TupleDesc res_tupdesc = RelationGetDescr(rel);
         int natts = res_tupdesc->natts;
 
@@ -55,7 +57,7 @@ get_or_create_layout(Oid relid) {
             if (attr->attisdropped) continue;
 
             if (attr->attlen < 0) {
-                relation_close(rel, AccessShareLock);
+                table_close(rel, AccessShareLock);
                 ereport(ERROR, (errmsg("Колонка %s имеет переменную длину. Поддерживаются только фиксированные типы.", NameStr(attr->attname))));
             }
 
@@ -63,7 +65,7 @@ get_or_create_layout(Oid relid) {
             layout->total_binary_size += attr->attlen;
         }
         layout->is_valid = true;
-        relation_close(rel, AccessShareLock);
+        table_close(rel, AccessShareLock);
     }
     return layout;
 }
