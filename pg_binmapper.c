@@ -103,40 +103,38 @@ parse_binary_payload(PG_FUNCTION_ARGS) {
   for (int i = 0; i < layout -> tupdesc -> natts; i++) {
     Form_pg_attribute attr = TupleDescAttr(layout -> tupdesc, i);
     char * field_ptr = raw_ptr + layout -> offsets[i];
+    int len = 0;
 
     if (attr -> attisdropped) {
       nulls[i] = true;
       continue;
     }
 
-    if (attr -> attbyval) {
-      // Типы по значению (int2, int4, int8, float4, float8)
-      Datum val = 0;
-      memcpy( & val, field_ptr, attr -> attlen);
+    // определяем реальную длину типа
+    if (attr -> attlen > 0) {
+      len = attr -> attlen;
+    } else if (attr -> atttypid == 2950) { // UUID OID
+      len = 16;
+    } else {
+      ereport(ERROR, (errmsg("Unsupported type OID %u for column %s",
+        attr -> atttypid, NameStr(attr -> attname))));
+    }
 
-      // РАЗВОРАЧИВАЕМ БАЙТЫ для корректного значения
-      if (attr -> attlen == 8) val = pg_bswap64(val);
-      else if (attr -> attlen == 4) val = pg_bswap32((uint32) val);
-      else if (attr -> attlen == 2) val = pg_bswap16((uint16) val);
+    if (attr -> attbyval) {
+      Datum val = 0;
+      memcpy( & val, field_ptr, (len <= sizeof(Datum)) ? len : sizeof(Datum));
+
+      // Разворот Big-Endian
+      if (len == 8) val = pg_bswap64(val);
+      else if (len == 4) val = (Datum) pg_bswap32((uint32) val);
+      else if (len == 2) val = (Datum) pg_bswap16((uint16) val);
 
       values[i] = val;
     } else {
-        // Ссылочные типы (UUID и др.)
-        // ЗАЩИТА: проверяем, что длина положительная
-        int len = attr->attlen;
-        
-        if (len <= 0) {
-            // Если тип переменной длины (например, uuid в некоторых версиях), 
-            // берем фиксированный размер для UUID (16) или выдаем ошибку
-            if (attr->atttypid == 2950) len = 16; // 2950 = UUID OID
-            else {
-                ereport(ERROR, (errmsg("Unsupported variable length type for column %s", NameStr(attr->attname))));
-            }
-        }
-
-        void *copy = palloc(len); 
-        memcpy(copy, field_ptr, len);
-        values[i] = PointerGetDatum(copy);
+      // Ссылочные типы (UUID и т.д.)
+      void * copy = palloc(len);
+      memcpy(copy, field_ptr, len);
+      values[i] = PointerGetDatum(copy);
     }
   }
 
