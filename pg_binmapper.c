@@ -117,37 +117,41 @@ parse_binary_payload(PG_FUNCTION_ARGS) {
 
     for (int i = 0; i < layout->tupdesc->natts; i++) {
         Form_pg_attribute attr = TupleDescAttr(layout->tupdesc, i);
-        char *field_ptr;
-        int len;
+        char *field_ptr = raw_ptr + layout->offsets[i];
+        int len = (attr->attlen > 0) ? attr->attlen : (attr->atttypid == 2950 ? 16 : 0);
 
-        if (attr->attisdropped) {
-            nulls[i] = true;
-            continue;
-        }
-
-        field_ptr = raw_ptr + layout->offsets[i];
-        len = (attr->attlen > 0) ? attr->attlen : (attr->atttypid == 2950 ? 16 : 0);
+        if (attr->attisdropped) { nulls[i] = true; continue; }
 
         if (attr->attbyval) {
             uint64 raw_val = 0;
             memcpy(&raw_val, field_ptr, (len <= 8) ? len : 8);
 
-            /* Разворот Endianness */
+            /* Разворот Big-Endian */
             if (len == 8) raw_val = pg_bswap64(raw_val);
             else if (len == 4) raw_val = (uint64)pg_bswap32((uint32)raw_val);
             else if (len == 2) raw_val = (uint64)pg_bswap16((uint16)raw_val);
 
-            /* Используем хранение float4 в Datum правильно */
-            if (attr->atttypid == 700) { /* FLOAT4OID */
-                union { uint32 i; float4 f; } u;
-                u.i = (uint32)raw_val;
-                values[i] = Float4GetDatum(u.f);
-            } else {
-                values[i] = (Datum)raw_val;
+            /* Жесткая упаковка по OID типов */
+            switch (attr->atttypid) {
+                case 23: // INT4
+                    values[i] = Int32GetDatum((int32)raw_val);
+                    break;
+                case 20: // INT8
+                    values[i] = Int64GetDatum((int64)raw_val);
+                    break;
+                case 700: { // FLOAT4
+                    union { uint32 i; float4 f; } u;
+                    u.i = (uint32)raw_val;
+                    values[i] = Float4GetDatum(u.f);
+                    break;
+                }
+                default:
+                    values[i] = (Datum)raw_val;
             }
         } else {
-            /* Ссылочные типы (UUID) — выделяем память СТРОГО под размер типа */
-            void *copy = palloc0(len); 
+            /* Для UUID и фиксированных ссылочных типов */
+            /* Используем palloc в контексте текущего вызова */
+            void *copy = palloc(len);
             memcpy(copy, field_ptr, len);
             values[i] = PointerGetDatum(copy);
         }
