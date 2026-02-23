@@ -8,6 +8,7 @@
 #include "utils/hsearch.h"
 #include "utils/inval.h"
 #include "port/pg_bswap.h"
+#include "utils/uuid.h"
 
 PG_MODULE_MAGIC;
 
@@ -128,9 +129,18 @@ Datum parse_binary_payload(PG_FUNCTION_ARGS) {
                 values[i] = (Datum)tmp;
             }
         } else {
-            void *copy = palloc(len);
-            memcpy(copy, field_ptr, len);
-            values[i] = PointerGetDatum(copy);
+            /* Ссылочные типы (UUID) */
+            if (attr->atttypid == 2950) { /* UUID OID */
+                /* Выделяем память под официальную структуру UUID */
+                pg_uuid_t *uuid = (pg_uuid_t *) palloc(sizeof(pg_uuid_t));
+                memcpy(uuid->data, field_ptr, 16);
+                values[i] = UUIDPGetDatum(uuid);
+            } else {
+                /* Для прочих типов (если будут) */
+                void *copy = palloc(len);
+                memcpy(copy, field_ptr, len);
+                values[i] = PointerGetDatum(copy);
+            }
         }
     }
 
