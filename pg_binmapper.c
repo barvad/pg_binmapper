@@ -158,10 +158,23 @@ parse_binary_payload(PG_FUNCTION_ARGS)
         else
         {
             /* Ссылочные типы (UUID) */
-            int len = (attr->atttypid == 2950) ? 16 : attr->attlen;
-            char *copy = palloc(len);
-            memcpy(copy, data + offset, len);
-            values[i] = PointerGetDatum(copy);
+            if (attr->atttypid == 2950) /* UUID OID */
+            {
+                /* Используем штатный способ создания UUID в памяти Postgres */
+                pg_uuid_t *uuid = (pg_uuid_t *) palloc(sizeof(pg_uuid_t));
+                memcpy(uuid->data, data + offset, 16);
+                values[i] = UUIDPGetDatum(uuid);
+                offset += 16;
+            }
+            else
+            {
+                /* Для остальных ссылочных типов (если появятся) */
+                int len = attr->attlen;
+                char *copy = palloc(len);
+                memcpy(copy, data + offset, len);
+                values[i] = PointerGetDatum(copy);
+                offset += len;
+            }
         }
         offset += (attr->attlen > 0) ? attr->attlen : 16;
     }
