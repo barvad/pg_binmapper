@@ -65,24 +65,20 @@ get_or_create_layout(Oid relid) {
         layout->offsets = (int *) MemoryContextAllocZero(TopMemoryContext, natts * sizeof(int));
         layout->total_binary_size = 0;
 
+        /* Инициализируем оффсеты как -1 (пропуск) */
+        for (int i = 0; i < natts; i++) layout->offsets[i] = -1;
+
+        /* ВАЖНО: Идем по порядку номеров колонок (1, 2, 3...) */
         for (int i = 0; i < natts; i++) {
             Form_pg_attribute attr = TupleDescAttr(layout->tupdesc, i);
 
-            /* ИГНОРИРУЕМ: удаленные колонки и системные (oid, ctid и т.д.) */
-            if (attr->attisdropped || attr->attnum <= 0) {
-                layout->offsets[i] = -1; /* Помечаем как невалидную для парсинга */
-                continue;
-            }
+            /* Пропускаем удаленные и системные колонки */
+            if (attr->attisdropped || attr->attnum <= 0) continue;
 
             int col_len = 0;
-            if (attr->attlen > 0) {
-                col_len = attr->attlen;
-            } else if (attr->atttypid == 2950) { // UUID
-                col_len = 16;
-            } else {
-                table_close(rel, AccessShareLock);
-                ereport(ERROR, (errmsg("Column %s has unsupported var-length type", NameStr(attr->attname))));
-            }
+            if (attr->attlen > 0) col_len = attr->attlen;
+            else if (attr->atttypid == 2950) col_len = 16; /* UUID */
+            else continue;
 
             layout->offsets[i] = layout->total_binary_size;
             layout->total_binary_size += col_len;
@@ -93,7 +89,6 @@ get_or_create_layout(Oid relid) {
     }
     return layout;
 }
-
 
 PG_FUNCTION_INFO_V1(parse_binary_payload);
 
@@ -126,58 +121,39 @@ parse_binary_payload(PG_FUNCTION_ARGS)
     values = (Datum *) palloc0(tupdesc->natts * sizeof(Datum));
     nulls = (bool *) palloc0(tupdesc->natts * sizeof(bool));
 
-    for (i = 0; i < tupdesc->natts; i++)
-    {
-        Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-        if (attr->attisdropped)
-        {
+    for (int i = 0; i < layout->tupdesc->natts; i++) {
+        Form_pg_attribute attr = TupleDescAttr(layout->tupdesc, i);
+        
+        if (layout->offsets[i] == -1) {
             nulls[i] = true;
             continue;
         }
 
-        if (attr->attbyval)
-        {
-            uint64 tmp = 0;
-            memcpy(&tmp, data + offset, attr->attlen);
+        char *field_ptr = raw_ptr + layout->offsets[i];
+        int len = (attr->attlen > 0) ? attr->attlen : 16;
 
-            /* Разворот Big-Endian */
-            if (attr->attlen == 8) tmp = pg_bswap64(tmp);
-            else if (attr->attlen == 4) tmp = (uint64)pg_bswap32((uint32)tmp);
-            else if (attr->attlen == 2) tmp = (uint64)pg_bswap16((uint16)tmp);
+        if (attr->attbyval) {
+            uint64 raw_val = 0;
+            memcpy(&raw_val, field_ptr, len);
 
-            if (attr->atttypid == FLOAT4OID)
-            {
+            if (len == 8) raw_val = pg_bswap64(raw_val);
+            else if (len == 4) raw_val = (uint64)pg_bswap32((uint32)raw_val);
+            else if (len == 2) raw_val = (uint64)pg_bswap16((uint16)raw_val);
+
+            /* Используем макросы для float4 */
+            if (attr->atttypid == 700) {
                 union { uint32 i; float4 f; } u;
-                u.i = (uint32)tmp;
+                u.i = (uint32)raw_val;
                 values[i] = Float4GetDatum(u.f);
+            } else {
+                values[i] = (Datum)raw_val;
             }
-            else
-            {
-                values[i] = (Datum)tmp;
-            }
+        } else {
+            /* UUID - создаем копию и передаем УКАЗАТЕЛЬ */
+            void *copy = palloc(len);
+            memcpy(copy, field_ptr, len);
+            values[i] = PointerGetDatum(copy);
         }
-        else
-        {
-            /* Ссылочные типы (UUID) */
-            if (attr->atttypid == 2950) /* UUID OID */
-            {
-                /* Используем штатный способ создания UUID в памяти Postgres */
-                pg_uuid_t *uuid = (pg_uuid_t *) palloc(sizeof(pg_uuid_t));
-                memcpy(uuid->data, data + offset, 16);
-                values[i] = UUIDPGetDatum(uuid);
-                offset += 16;
-            }
-            else
-            {
-                /* Для остальных ссылочных типов (если появятся) */
-                int len = attr->attlen;
-                char *copy = palloc(len);
-                memcpy(copy, data + offset, len);
-                values[i] = PointerGetDatum(copy);
-                offset += len;
-            }
-        }
-        offset += (attr->attlen > 0) ? attr->attlen : 16;
     }
 
     tuple = heap_form_tuple(tupdesc, values, nulls);
