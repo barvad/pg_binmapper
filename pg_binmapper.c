@@ -121,10 +121,22 @@ parse_binary_payload(PG_FUNCTION_ARGS) {
 
       values[i] = val;
     } else {
-      // Ссылочные типы (UUID и т.д.)
-      void * copy = palloc(attr -> attlen);
-      memcpy(copy, field_ptr, attr -> attlen);
-      values[i] = PointerGetDatum(copy);
+        // Ссылочные типы (UUID и др.)
+        // ЗАЩИТА: проверяем, что длина положительная
+        int len = attr->attlen;
+        
+        if (len <= 0) {
+            // Если тип переменной длины (например, uuid в некоторых версиях), 
+            // берем фиксированный размер для UUID (16) или выдаем ошибку
+            if (attr->atttypid == 2950) len = 16; // 2950 = UUID OID
+            else {
+                ereport(ERROR, (errmsg("Unsupported variable length type for column %s", NameStr(attr->attname))));
+            }
+        }
+
+        void *copy = palloc(len); 
+        memcpy(copy, field_ptr, len);
+        values[i] = PointerGetDatum(copy);
     }
   }
 
