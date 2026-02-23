@@ -94,57 +94,56 @@ static TableBinaryLayout *
   }
 
 PG_FUNCTION_INFO_V1(parse_binary_payload);
+PG_FUNCTION_INFO_V1(parse_binary_payload);
+Datum parse_binary_payload(PG_FUNCTION_ARGS) {
+    Oid table_oid = PG_GETARG_OID(0);
+    bytea *payload = PG_GETARG_BYTEA_P(1);
+    char *data = VARDATA_ANY(payload);
+    int data_len = VARSIZE_ANY_EXHDR(payload);
 
-Datum
-parse_binary_payload(PG_FUNCTION_ARGS)
-{
-    bytea *binary_data = PG_GETARG_BYTEA_P(1);
-    char *raw_ptr = VARDATA_ANY(binary_data);
-    int input_size = VARSIZE_ANY_EXHDR(binary_data);
+    TableBinaryLayout *layout = get_or_create_layout(table_oid);
+    TupleDesc tupdesc = layout->tupdesc;
     
-    TupleDesc tupdesc;
-    Datum *values;
-    bool *nulls;
-    HeapTuple tuple;
+    Datum *values = palloc0(tupdesc->natts * sizeof(Datum));
+    bool *nulls = palloc0(tupdesc->natts * sizeof(bool));
+    int offset = 0;
 
-    uint32 v4;
-    uint64 v8;
-    union { uint32 i; float4 f; } u;
-    unsigned char *uuid_data;
+    if (data_len != layout->total_binary_size)
+        elog(ERROR, "Expected %d bytes, got %d", layout->total_binary_size, data_len);
 
-    if (input_size != 32)
-        ereport(ERROR, (errmsg("Expected 32 bytes, got %d", input_size)));
+    for (int i = 0; i < tupdesc->natts; i++) {
+        Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+        if (attr->attisdropped) { nulls[i] = true; continue; }
 
-    /* СОЗДАЕМ ОПИСАНИЕ СТРОКИ ВРУЧНУЮ */
-    tupdesc = CreateTemplateTupleDesc(4);
-    TupleDescInitEntry(tupdesc, (AttrNumber) 1, "id", INT4OID, -1, 0);
-    TupleDescInitEntry(tupdesc, (AttrNumber) 2, "ts", INT8OID, -1, 0);
-    TupleDescInitEntry(tupdesc, (AttrNumber) 3, "temperature", FLOAT4OID, -1, 0);
-    TupleDescInitEntry(tupdesc, (AttrNumber) 4, "device_uid", UUIDOID, -1, 0);
-    tupdesc = BlessTupleDesc(tupdesc);
+        if (attr->attbyval) {
+            // Читаем числовые типы (int, float)
+            uint64 tmp = 0;
+            memcpy(&tmp, data + offset, attr->attlen);
 
-    values = (Datum *) palloc0(4 * sizeof(Datum));
-    nulls = (bool *) palloc0(4 * sizeof(bool));
+            // Разворот Big-Endian
+            if (attr->attlen == 8) tmp = pg_bswap64(tmp);
+            else if (attr->attlen == 4) tmp = pg_bswap32((uint32)tmp);
+            else if (attr->attlen == 2) tmp = pg_bswap16((uint16)tmp);
 
-    // 1. ID
-    memcpy(&v4, raw_ptr + 0, 4);
-    values[0] = Int32GetDatum(pg_bswap32(v4));
+            // Магия Float4: Postgres хранит float4 в Datum как "притворяющийся" int32
+            if (attr->atttypid == FLOAT4OID) {
+                union { uint32 i; float4 f; } u;
+                u.i = (uint32)tmp;
+                values[i] = Float4GetDatum(u.f);
+            } else {
+                values[i] = (Datum)tmp;
+            }
+        } else {
+            // Для ссылочных типов (UUID) копируем данные в новую память
+            // Postgres сам позаботится о выравнивании внутри heap_form_tuple
+            int len = (attr->atttypid == 2950) ? 16 : attr->attlen;
+            char *copy = palloc(len);
+            memcpy(copy, data + offset, len);
+            values[i] = PointerGetDatum(copy);
+        }
+        offset += (attr->attlen > 0) ? attr->attlen : 16;
+    }
 
-    // 2. TS
-    memcpy(&v8, raw_ptr + 4, 8);
-    values[1] = Int64GetDatum(pg_bswap64(v8));
-
-    // 3. Temp
-    memcpy(&u.i, raw_ptr + 12, 4);
-    u.i = pg_bswap32(u.i);
-    values[2] = Float4GetDatum(u.f);
-
-    // 4. UUID - ТЕПЕРЬ ЭТО ГАРАНТИРОВАННО ЧЕТВЕРТОЕ ПОЛЕ
-    uuid_data = (unsigned char *) palloc(16);
-    memcpy(uuid_data, raw_ptr + 16, 16);
-    values[3] = PointerGetDatum(uuid_data);
-
-    tuple = heap_form_tuple(tupdesc, values, nulls);
-    
+    HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
