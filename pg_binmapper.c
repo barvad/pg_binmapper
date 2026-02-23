@@ -118,43 +118,34 @@ parse_binary_payload(PG_FUNCTION_ARGS)
     values = (Datum *) palloc0(layout->tupdesc->natts * sizeof(Datum));
     nulls = (bool *) palloc0(layout->tupdesc->natts * sizeof(bool));
 
-    for (int i = 0; i < layout->tupdesc->natts; i++) {
-        Form_pg_attribute attr = TupleDescAttr(layout->tupdesc, i);
-        char *field_ptr;
-        int len;
-
-        if (attr->attisdropped) {
-            nulls[i] = true;
-            continue;
-        }
-
-        field_ptr = raw_ptr + layout->offsets[i];
-        len = (attr->attlen > 0) ? attr->attlen : (attr->atttypid == 2950 ? 16 : 0);
-
-        if (attr->attbyval) {
-            uint64 raw_val = 0;
-            memcpy(&raw_val, field_ptr, (len <= 8) ? len : 8);
-
-            if (len == 8) raw_val = pg_bswap64(raw_val);
-            else if (len == 4) raw_val = (uint64)pg_bswap32((uint32)raw_val);
-            else if (len == 2) raw_val = (uint64)pg_bswap16((uint16)raw_val);
-
-            // Безопасная упаковка float4
-            if (attr->atttypid == 700) {
-                union { uint32 i; float4 f; } u;
-                u.i = (uint32)raw_val;
-                values[i] = Float4GetDatum(u.f);
-            } else {
-                values[i] = (Datum)raw_val;
-            }
-        } else {
-            // Для UUID (byref): обязательно делаем отдельный palloc
-            // и передаем именно PointerGetDatum
-            char *copy = (char *) palloc(len);
-            memcpy(copy, field_ptr, len);
-            values[i] = PointerGetDatum(copy);
-        }
+    {
+        uint32 val4;
+        memcpy(&val4, raw_ptr + 0, 4);
+        values[0] = Int32GetDatum(pg_bswap32(val4));
     }
+
+    // 2. Поле TS (int8) - Смещение 4, Длина 8
+    {
+        uint64 val8;
+        memcpy(&val8, raw_ptr + 4, 8);
+        values[1] = Int64GetDatum(pg_bswap64(val8));
+    }
+
+    // 3. Поле Temperature (float4) - Смещение 12, Длина 4
+    {
+        union { uint32 i; float4 f; } u;
+        memcpy(&u.i, raw_ptr + 12, 4);
+        u.i = pg_bswap32(u.i);
+        values[2] = Float4GetDatum(u.f);
+    }
+
+    // 4. Поле UUID - Смещение 16, Длина 16
+    {
+        void *uuid_ptr = palloc(16);
+        memcpy(uuid_ptr, raw_ptr + 16, 16);
+        values[3] = PointerGetDatum(uuid_ptr);
+    }
+
 
     tuple = heap_form_tuple(layout->tupdesc, values, nulls);
     
