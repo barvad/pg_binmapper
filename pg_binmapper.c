@@ -67,13 +67,19 @@ static TableBinaryLayout *
         Form_pg_attribute attr = TupleDescAttr(layout -> tupdesc, i);
         if (attr -> attisdropped) continue;
 
-        if (attr -> attlen < 0) {
-          table_close(rel, AccessShareLock);
-          ereport(ERROR, (errmsg("Колонка %s имеет переменную длину. Поддерживаются только фиксированные типы.", NameStr(attr -> attname))));
+        int col_len = attr -> attlen;
+        if (col_len < 0) {
+          // Если это UUID, мы знаем, что он 16 байт
+          if (attr -> atttypid == 2950) {
+            col_len = 16;
+          } else {
+            table_close(rel, AccessShareLock);
+            ereport(ERROR, (errmsg("Column %s has variable length and is not UUID.", NameStr(attr -> attname))));
+          }
         }
 
         layout -> offsets[i] = layout -> total_binary_size;
-        layout -> total_binary_size += attr -> attlen;
+        layout -> total_binary_size += col_len;
       }
       layout -> is_valid = true;
       table_close(rel, AccessShareLock);
@@ -103,35 +109,33 @@ parse_binary_payload(PG_FUNCTION_ARGS) {
   for (int i = 0; i < layout -> tupdesc -> natts; i++) {
     Form_pg_attribute attr = TupleDescAttr(layout -> tupdesc, i);
     char * field_ptr = raw_ptr + layout -> offsets[i];
-    int len = 0;
+    int len = (attr -> attlen > 0) ? attr -> attlen : (attr -> atttypid == 2950 ? 16 : 0);
 
     if (attr -> attisdropped) {
       nulls[i] = true;
       continue;
     }
-
-    // определяем реальную длину типа
-    if (attr -> attlen > 0) {
-      len = attr -> attlen;
-    } else if (attr -> atttypid == 2950) { // UUID OID
-      len = 16;
-    } else {
-      ereport(ERROR, (errmsg("Unsupported type OID %u for column %s",
-        attr -> atttypid, NameStr(attr -> attname))));
-    }
+    if (len <= 0) ereport(ERROR, (errmsg("Unsupported type size for %s", NameStr(attr -> attname))));
 
     if (attr -> attbyval) {
-      Datum val = 0;
-      memcpy( & val, field_ptr, (len <= sizeof(Datum)) ? len : sizeof(Datum));
-
-      // Разворот Big-Endian
-      if (len == 8) val = pg_bswap64(val);
-      else if (len == 4) val = (Datum) pg_bswap32((uint32) val);
-      else if (len == 2) val = (Datum) pg_bswap16((uint16) val);
-
-      values[i] = val;
+      if (len == 8) {
+        uint64 val8;
+        memcpy( & val8, field_ptr, 8);
+        values[i] = Int64GetDatum(pg_bswap64(val8));
+      } else if (len == 4) {
+        uint32 val4;
+        memcpy( & val4, field_ptr, 4);
+        values[i] = Int32GetDatum(pg_bswap32(val4));
+      } else if (len == 2) {
+        uint16 val2;
+        memcpy( & val2, field_ptr, 2);
+        values[i] = Int16GetDatum(pg_bswap16(val2));
+      } else {
+        values[i] = (Datum) 0;
+        memcpy( & values[i], field_ptr, len);
+      }
     } else {
-      // Ссылочные типы (UUID и т.д.)
+      // Для UUID и других ссылочных типов (palloc безопасен)
       void * copy = palloc(len);
       memcpy(copy, field_ptr, len);
       values[i] = PointerGetDatum(copy);
