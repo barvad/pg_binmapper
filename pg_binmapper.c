@@ -43,21 +43,28 @@ get_or_create_layout(Oid relid) {
     bool found;
     TableBinaryLayout *layout = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_ENTER, &found);
 
-    /* Если запись уже есть и она валидна — СРАЗУ возвращаем её */
     if (found && layout->is_valid) {
         return layout;
     }
 
-    /* Если мы здесь, значит мы первые или кэш инвалидирован */
     Relation rel = table_open(relid, AccessShareLock);
     TupleDesc res_tupdesc = RelationGetDescr(rel);
     int natts = res_tupdesc->natts;
     int i;
 
-    /* Инициализируем поля только ОДИН раз */
-    layout->relid = relid;
+    /* ВАЖНО: Переключаемся в TopMemoryContext перед копированием */
+    MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+
+    /* Глубокое копирование дескриптора, который выживет после table_close */
     layout->tupdesc = CreateTupleDescCopy(res_tupdesc);
-    layout->offsets = (int *) MemoryContextAllocZero(TopMemoryContext, natts * sizeof(int));
+    
+    /* Выделяем оффсеты тоже в TopMemoryContext */
+    layout->offsets = (int *) palloc0(natts * sizeof(int));
+    
+    /* Возвращаемся в контекст функции */
+    MemoryContextSwitchTo(oldcxt);
+
+    layout->relid = relid;
     layout->total_binary_size = 0;
 
     for (i = 0; i < natts; i++) {
@@ -70,17 +77,17 @@ get_or_create_layout(Oid relid) {
         }
 
         if (attr->attlen > 0) col_len = attr->attlen;
-        else if (attr->atttypid == UUIDOID) col_len = 16;
+        else if (attr->atttypid == 2950) col_len = 16; /* UUIDOID */
         else {
             table_close(rel, AccessShareLock);
-            ereport(ERROR, (errmsg("Unsupported type for column %s", NameStr(attr->attname))));
+            elog(ERROR, "Unsupported type OID %u", attr->atttypid);
         }
 
         layout->offsets[i] = layout->total_binary_size;
         layout->total_binary_size += col_len;
     }
 
-    layout->is_valid = true; /* Только теперь помечаем как готовую */
+    layout->is_valid = true;
     table_close(rel, AccessShareLock);
     
     return layout;
