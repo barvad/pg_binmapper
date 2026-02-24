@@ -49,7 +49,7 @@ get_or_create_layout(Oid relid) {
 
     Relation rel = table_open(relid, AccessExclusiveLock);
 	
-    TableBinaryLayout *layout = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_ENTER, &found);
+    layout = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_ENTER, &found);
 
     if (found && layout->is_valid) {
 		table_close(rel, AccessExclusiveLock);
