@@ -38,29 +38,51 @@ void _PG_init(void) {
     CacheRegisterRelcacheCallback(invalidate_layout_cache, (Datum) 0);
 }
 
-static TableBinaryLayout* get_or_create_layout(Oid relid) {
+static TableBinaryLayout*
+get_or_create_layout(Oid relid) {
     bool found;
     TableBinaryLayout *layout = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_ENTER, &found);
-    if (!found || !layout->is_valid) {
-        Relation rel = table_open(relid, AccessShareLock);
-        TupleDesc desc = RelationGetDescr(rel);
-        int i;
-        layout->tupdesc = CreateTupleDescCopy(desc);
-        layout->offsets = (int *) MemoryContextAllocZero(TopMemoryContext, desc->natts * sizeof(int));
-        layout->total_binary_size = 0;
-        for (i = 0; i < desc->natts; i++) {
-            Form_pg_attribute attr = TupleDescAttr(layout->tupdesc, i);
-            int len = 0;
-            if (attr->attisdropped || attr->attnum <= 0) { layout->offsets[i] = -1; continue; }
-            if (attr->attlen > 0) len = attr->attlen;
-            else if (attr->atttypid == UUIDOID) len = 16;
-            else { table_close(rel, AccessShareLock); elog(ERROR, "Type not supported"); }
-            layout->offsets[i] = layout->total_binary_size;
-            layout->total_binary_size += len;
-        }
-        layout->is_valid = true;
-        table_close(rel, AccessShareLock);
+
+    /* Если запись уже есть и она валидна — СРАЗУ возвращаем её */
+    if (found && layout->is_valid) {
+        return layout;
     }
+
+    /* Если мы здесь, значит мы первые или кэш инвалидирован */
+    Relation rel = table_open(relid, AccessShareLock);
+    TupleDesc res_tupdesc = RelationGetDescr(rel);
+    int natts = res_tupdesc->natts;
+    int i;
+
+    /* Инициализируем поля только ОДИН раз */
+    layout->relid = relid;
+    layout->tupdesc = CreateTupleDescCopy(res_tupdesc);
+    layout->offsets = (int *) MemoryContextAllocZero(TopMemoryContext, natts * sizeof(int));
+    layout->total_binary_size = 0;
+
+    for (i = 0; i < natts; i++) {
+        Form_pg_attribute attr = TupleDescAttr(layout->tupdesc, i);
+        int col_len = 0;
+
+        if (attr->attisdropped || attr->attnum <= 0) {
+            layout->offsets[i] = -1;
+            continue;
+        }
+
+        if (attr->attlen > 0) col_len = attr->attlen;
+        else if (attr->atttypid == UUIDOID) col_len = 16;
+        else {
+            table_close(rel, AccessShareLock);
+            ereport(ERROR, (errmsg("Unsupported type for column %s", NameStr(attr->attname))));
+        }
+
+        layout->offsets[i] = layout->total_binary_size;
+        layout->total_binary_size += col_len;
+    }
+
+    layout->is_valid = true; /* Только теперь помечаем как готовую */
+    table_close(rel, AccessShareLock);
+    
     return layout;
 }
 
