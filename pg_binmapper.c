@@ -47,7 +47,15 @@ get_or_create_layout(Oid relid) {
         return layout;
     }
 
-    Relation rel = table_open(relid, AccessShareLock);
+    Relation rel = table_open(relid, AccessExclusiveLock);
+	
+    TableBinaryLayout *layout = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_ENTER, &found);
+
+    if (found && layout->is_valid) {
+		table_close(rel, AccessExclusiveLock);
+        return layout;
+    }
+	
     TupleDesc res_tupdesc = RelationGetDescr(rel);
     int natts = res_tupdesc->natts;
     int i;
@@ -79,7 +87,7 @@ get_or_create_layout(Oid relid) {
         if (attr->attlen > 0) col_len = attr->attlen;
         else if (attr->atttypid == 2950) col_len = 16; /* UUIDOID */
         else {
-            table_close(rel, AccessShareLock);
+            table_close(rel, AccessExclusiveLock);
             elog(ERROR, "Unsupported type OID %u", attr->atttypid);
         }
 
@@ -88,7 +96,7 @@ get_or_create_layout(Oid relid) {
     }
 
     layout->is_valid = true;
-    table_close(rel, AccessShareLock);
+    table_close(rel, AccessExclusiveLock);
     
     return layout;
 }
