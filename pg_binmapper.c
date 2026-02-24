@@ -114,6 +114,7 @@ parse_binary_payload(PG_FUNCTION_ARGS)
                 layout->total_binary_size, input_size)));
     }
 
+    elog(LOG, "[BINMAPPER] Trying alloc size %d",layout->tupdesc->natts * sizeof(Datum));
     values = (Datum *) palloc0(layout->tupdesc->natts * sizeof(Datum));
     nulls = (bool *) palloc0(layout->tupdesc->natts * sizeof(bool));
 
