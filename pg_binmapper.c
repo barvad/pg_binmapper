@@ -133,29 +133,25 @@ parse_binary_payload(PG_FUNCTION_ARGS)
         }
     }
 
-    elog(LOG, "[BINMAPPER] Calling heap_form_tuple");
-    tuple = heap_form_tuple(layout->tupdesc, values, nulls);
+    elog(LOG, "[BINMAPPER] Forming tuple and blessing descriptor");
     
     /* 
-     * ВАЖНО: Устанавливаем метаданные типа ПЕРЕД конвертацией в Datum.
-     * Мы используем t_data (заголовок) внутри сформированного кортежа.
+     * BlessTupleDesc регистрирует структуру RECORD в системе.
+     * Это критично для функций, возвращающих анонимные рекорды.
      */
+    BlessTupleDesc(layout->tupdesc);
+    tuple = heap_form_tuple(layout->tupdesc, values, nulls);
+    
+    /* Устанавливаем метаданные типа */
     HeapTupleHeaderSetTypeId(tuple->t_data, get_rel_type_id(table_oid));
     HeapTupleHeaderSetTypMod(tuple->t_data, -1);
 
-    elog(LOG, "[BINMAPPER] Converting tuple to Datum (Safe copy)");
+    elog(LOG, "[BINMAPPER] Returning HeapTupleHeader as Datum");
+
     /* 
-     * heap_copy_tuple_as_datum копирует кортеж в контекст вызывающей стороны.
-     * Это решает проблему 'invalid memory alloc', так как Postgres сам 
-     * выделит нужный объем памяти с правильным выравниванием.
+     * ВНИМАНИЕ: Мы НЕ делаем heap_freetuple(tuple) и pfree(values).
+     * Postgres сам очистит MemoryContext функции после выполнения INSERT.
+     * Если мы удалим это сейчас, Postgres получит битый указатель (Segmentation Fault).
      */
-    result_datum = heap_copy_tuple_as_datum(tuple, layout->tupdesc);
-
-    elog(LOG, "[BINMAPPER] Cleanup");
-    pfree(values);
-    pfree(nulls);
-    heap_freetuple(tuple);
-
-    elog(LOG, "[BINMAPPER] Returning result");
-    PG_RETURN_DATUM(result_datum);
+    PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
