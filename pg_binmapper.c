@@ -67,7 +67,6 @@ static TableBinaryLayout* get_or_create_layout(Oid relid) {
 
 PG_FUNCTION_INFO_V1(parse_binary_payload);
 
-PG_FUNCTION_INFO_V1(parse_binary_payload);
 Datum
 parse_binary_payload(PG_FUNCTION_ARGS)
 {
