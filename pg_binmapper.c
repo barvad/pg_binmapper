@@ -67,7 +67,9 @@ static TableBinaryLayout* get_or_create_layout(Oid relid) {
 
 PG_FUNCTION_INFO_V1(parse_binary_payload);
 
-Datum parse_binary_payload(PG_FUNCTION_ARGS)
+PG_FUNCTION_INFO_V1(parse_binary_payload);
+Datum
+parse_binary_payload(PG_FUNCTION_ARGS)
 {
     Oid table_oid = PG_GETARG_OID(0);
     bytea *payload = PG_GETARG_BYTEA_P(1);
@@ -78,10 +80,13 @@ Datum parse_binary_payload(PG_FUNCTION_ARGS)
     Datum *values;
     bool *nulls;
     HeapTuple tuple;
-    HeapTupleHeader res; /* Перенесено в начало для C90 */
+    Datum result_datum;
     int i;
 
     layout = get_or_create_layout(table_oid);
+
+    elog(LOG, "[BINMAPPER] Start: TableOID=%u, InputSize=%d, ExpectedSize=%d", 
+         table_oid, input_size, layout->total_binary_size);
 
     if (input_size != layout->total_binary_size) {
         ereport(ERROR, (errmsg("SIZE ERROR: expected %d, got %d", 
@@ -116,35 +121,42 @@ Datum parse_binary_payload(PG_FUNCTION_ARGS)
                 union { uint32 i; float4 f; } u;
                 u.i = (uint32)raw_val;
                 values[i] = Float4GetDatum(u.f);
+                elog(DEBUG1, "[BINMAPPER] Col %d (float4): %f", i, u.f);
             } else {
                 values[i] = (Datum)raw_val;
+                elog(DEBUG1, "[BINMAPPER] Col %d (int/long): %ld", i, (long)raw_val);
             }
         } else {
             pg_uuid_t *uuid = (pg_uuid_t *) palloc(sizeof(pg_uuid_t));
             memcpy(uuid->data, field_ptr, 16);
             values[i] = UUIDPGetDatum(uuid);
+            elog(DEBUG1, "[BINMAPPER] Col %d (uuid) mapped", i);
         }
     }
-	elog(LOG, "[BINMAPPER] heap_form_tuple");
+
+    elog(LOG, "[BINMAPPER] Calling heap_form_tuple");
     tuple = heap_form_tuple(layout->tupdesc, values, nulls);
     
-	elog(LOG, "[BINMAPPER]  palloc(tuple->t_len)");
-    /* Копируем данные заголовка кортежа */
-    res = (HeapTupleHeader) palloc(tuple->t_len);
-    memcpy(res, tuple->t_data, tuple->t_len);
-        
-	elog(LOG, "[BINMAPPER]  HeapTupleHeaderSetTypeId()");	
-    /* Привязываем кортеж к OID ТИПА */
-    HeapTupleHeaderSetTypeId(res, get_rel_type_id(table_oid));
-	elog(LOG, "[BINMAPPER]  HeapTupleHeaderSetTypMod()");
-    HeapTupleHeaderSetTypMod(res, -1);
+    /* 
+     * ВАЖНО: Устанавливаем метаданные типа ПЕРЕД конвертацией в Datum.
+     * Мы используем t_data (заголовок) внутри сформированного кортежа.
+     */
+    HeapTupleHeaderSetTypeId(tuple->t_data, get_rel_type_id(table_oid));
+    HeapTupleHeaderSetTypMod(tuple->t_data, -1);
 
-	elog(LOG, "[BINMAPPER]  Free all");
+    elog(LOG, "[BINMAPPER] Converting tuple to Datum (Safe copy)");
+    /* 
+     * heap_copy_tuple_as_datum копирует кортеж в контекст вызывающей стороны.
+     * Это решает проблему 'invalid memory alloc', так как Postgres сам 
+     * выделит нужный объем памяти с правильным выравниванием.
+     */
+    result_datum = heap_copy_tuple_as_datum(tuple, layout->tupdesc);
+
+    elog(LOG, "[BINMAPPER] Cleanup");
     pfree(values);
     pfree(nulls);
     heap_freetuple(tuple);
-	
-	elog(LOG, "[BINMAPPER]  PG_RETURN_DATUM");
-    /* Используем правильный макрос для возврата заголовка как Datum */
-    PG_RETURN_DATUM(HeapTupleHeaderGetDatum(res));
+
+    elog(LOG, "[BINMAPPER] Returning result");
+    PG_RETURN_DATUM(result_datum);
 }
