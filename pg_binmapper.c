@@ -40,23 +40,28 @@ void _PG_init(void) {
 
 static TableBinaryLayout*
 get_or_create_layout(Oid relid) {
+	TableBinaryLayout *layout_from_cache;
+	TupleDesc res_tupdesc;
     bool found;
-    TableBinaryLayout *layout = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_ENTER, &found);
+	TableBinaryLayout *layout;
+    layout_from_cache = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_FIND, &found);
 
-    if (found && layout->is_valid) {
-        return layout;
+    if (found && layout_from_cache->is_valid) {
+        return layout_from_cache;
     }
 
     Relation rel = table_open(relid, AccessExclusiveLock);
 	
-    layout = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_ENTER, &found);
+    layout_from_cache = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_FIND, &found);
 
-    if (found && layout->is_valid) {
+    if (found && layout_from_cache->is_valid) {
 		table_close(rel, AccessExclusiveLock);
-        return layout;
+        return layout_from_cache;
     }
 	
-    TupleDesc res_tupdesc = RelationGetDescr(rel);
+	layout = palloc0( sizeof(TableBinaryLayout));
+	
+    res_tupdesc = RelationGetDescr(rel);
     int natts = res_tupdesc->natts;
     int i;
 
@@ -85,10 +90,16 @@ get_or_create_layout(Oid relid) {
         }
 
         if (attr->attlen > 0) col_len = attr->attlen;
-        else if (attr->atttypid == 2950) col_len = 16; /* UUIDOID */
+        else if (attr->atttypid == 2950) col_len = UUID_LEN; /* UUIDOID */
         else {
             table_close(rel, AccessExclusiveLock);
+			layout->is_valid = false;
+            if (layout->tupdesc) FreeTupleDesc(layout->tupdesc);
+	        if (layout->offsets) pfree(layout->offsets);    
+            pfree(layout); 
+			
             elog(ERROR, "Unsupported type OID %u", attr->atttypid);
+			
         }
 
         layout->offsets[i] = layout->total_binary_size;
@@ -96,9 +107,17 @@ get_or_create_layout(Oid relid) {
     }
 
     layout->is_valid = true;
+	
+    layout_from_cache = (TableBinaryLayout *) hash_search(layout_cache, &relid, HASH_ENTER, &found);
+	layout_from_cache->is_valid=0;
+	memcpy(layout_from_cache,layout,sizeof(TableBinaryLayout));
+	
+	
     table_close(rel, AccessExclusiveLock);
+	
+	pfree(layout);
     
-    return layout;
+    return layout_from_cache;
 }
 
 
