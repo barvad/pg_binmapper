@@ -67,8 +67,7 @@ static TableBinaryLayout* get_or_create_layout(Oid relid) {
 
 PG_FUNCTION_INFO_V1(parse_binary_payload);
 
-Datum
-parse_binary_payload(PG_FUNCTION_ARGS)
+Datum parse_binary_payload(PG_FUNCTION_ARGS)
 {
     Oid table_oid = PG_GETARG_OID(0);
     bytea *payload = PG_GETARG_BYTEA_P(1);
@@ -126,21 +125,26 @@ parse_binary_payload(PG_FUNCTION_ARGS)
             values[i] = UUIDPGetDatum(uuid);
         }
     }
-
+	elog(LOG, "[BINMAPPER] heap_form_tuple");
     tuple = heap_form_tuple(layout->tupdesc, values, nulls);
     
+	elog(LOG, "[BINMAPPER]  palloc(tuple->t_len)");
     /* Копируем данные заголовка кортежа */
     res = (HeapTupleHeader) palloc(tuple->t_len);
     memcpy(res, tuple->t_data, tuple->t_len);
         
+	elog(LOG, "[BINMAPPER]  HeapTupleHeaderSetTypeId()");	
     /* Привязываем кортеж к OID ТИПА */
     HeapTupleHeaderSetTypeId(res, get_rel_type_id(table_oid));
+	elog(LOG, "[BINMAPPER]  HeapTupleHeaderSetTypMod()");
     HeapTupleHeaderSetTypMod(res, -1);
 
+	elog(LOG, "[BINMAPPER]  Free all");
     pfree(values);
     pfree(nulls);
     heap_freetuple(tuple);
-
+	
+	elog(LOG, "[BINMAPPER]  PG_RETURN_DATUM");
     /* Используем правильный макрос для возврата заголовка как Datum */
     PG_RETURN_DATUM(HeapTupleHeaderGetDatum(res));
 }
